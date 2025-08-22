@@ -1,0 +1,10 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# Other temporary files
+*~
