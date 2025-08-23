@@ -32,6 +32,9 @@ MAX_JUMPS = 2
 # Game variables
 INITIAL_LIVES = 3
 
+# High Score File
+HIGHSCORE_FILE = "highscore.txt"
+
 # Declare these as global variables at the module level.
 # They will be initialized by setup_game or directly here.
 player = None
@@ -44,6 +47,7 @@ score = 0
 lives = INITIAL_LIVES
 initial_coin_count_level = 0
 current_game_state = 0 # Initialize here too, as it's modified globally
+high_score = 0 # Initialize high score
 
 
 # --- Game States ---
@@ -81,6 +85,39 @@ except pygame.error:
     print("Asset Load: ERROR - background_image.png not found. Using default light blue background.")
     pass # No default image, will use screen.fill(LIGHT_BLUE) later
 
+
+# --- High Score Functions ---
+def load_high_score():
+    """Loads the high score from a file."""
+    global high_score
+    if os.path.exists(HIGHSCORE_FILE):
+        try:
+            with open(HIGHSCORE_FILE, "r") as file:
+                high_score = int(file.read())
+            print(f"High Score: Loaded {high_score}")
+        except ValueError:
+            high_score = 0 # Reset if file content is invalid
+            print("High Score: Invalid content in file, resetting to 0.")
+        except Exception as e:
+            high_score = 0
+            print(f"High Score: Error loading file: {e}, resetting to 0.")
+    else:
+        high_score = 0
+        print("High Score: File not found, starting with 0.")
+
+def save_high_score(current_score):
+    """Saves the high score to a file if current_score is higher."""
+    global high_score
+    if current_score > high_score:
+        high_score = current_score
+        with open(HIGHSCORE_FILE, "w") as file:
+            file.write(str(high_score))
+        print(f"High Score: New high score saved: {high_score}")
+    else:
+        print(f"High Score: Current score {current_score} not higher than {high_score}.")
+
+# Load high score once at the start of the game
+load_high_score()
 
 # --- Game Classes ---
 
@@ -143,6 +180,7 @@ class Player(pygame.sprite.Sprite):
             lives -= 1
             if lives <= 0:
                 current_game_state = GAME_STATE_GAMEOVER
+                save_high_score(score) # Check and save high score on Game Over
             else:
                 self.rect.x = 100
                 self.rect.y = 100
@@ -346,6 +384,7 @@ while running:
             if event.type == pygame.KEYDOWN:
                 current_game_state = GAME_STATE_PLAYING
                 setup_game() # Start a new game, resetting score and lives
+                load_high_score() # Reload high score just in case it was changed elsewhere
         elif current_game_state == GAME_STATE_PLAYING:
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_LEFT:
@@ -361,6 +400,8 @@ while running:
                 if event.key == pygame.K_ESCAPE: # Press ESC to go back to menu
                     current_game_state = GAME_STATE_MENU
                     setup_game() # Reset level when returning to menu
+                    save_high_score(score) # Check and save high score if returning to menu
+                    load_high_score() # Reload high score for menu display
                 if event.key == pygame.K_p: # New: Press 'P' to pause
                     current_game_state = GAME_STATE_PAUSED
             if event.type == pygame.KEYUP:
@@ -379,15 +420,19 @@ while running:
                 if event.key == pygame.K_ESCAPE: # Press ESC to return to menu from pause
                     current_game_state = GAME_STATE_MENU
                     setup_game() # Reset level
+                    save_high_score(score) # Check and save high score if returning to menu
+                    load_high_score() # Reload high score for menu display
         elif current_game_state == GAME_STATE_GAMEOVER:
             if event.type == pygame.KEYDOWN: # Listen for any key press to return to menu
                 current_game_state = GAME_STATE_MENU
                 setup_game() # Reset level and prepare for new game from menu
+                load_high_score() # Reload high score for menu display
 
         elif current_game_state == GAME_STATE_LEVEL_COMPLETE:
             if event.type == pygame.KEYDOWN: # Listen for any key press to go to next level
                 current_game_state = GAME_STATE_PLAYING # Transition to playing state
                 setup_game() # Setup a new random level
+                load_high_score() # Reload high score just in case
 
 
     # --- Drawing and Game Logic (moved here for continuous updates) ---
@@ -417,9 +462,7 @@ while running:
                     coins.add(new_coin)
                     all_sprites.add(new_coin)
             else: # Enemy collides with player from side or bottom, player takes damage
-                # lives is already module-level global, no 'global' needed here.
                 lives -= 1
-                # current_game_state is also module-level global, no 'global' needed here.
                 # Reset player position
                 player.rect.x = 100
                 player.rect.y = 100
@@ -429,17 +472,17 @@ while running:
 
                 if lives <= 0:
                     current_game_state = GAME_STATE_GAMEOVER
+                    save_high_score(score) # Check and save high score on Game Over
 
         # Player-Coin Collision
         collected_coins = pygame.sprite.spritecollide(player, coins, True) # True means remove coin on collision
         for coin in collected_coins:
-            # score is already module-level global, no 'global' needed here.
             score += 1
         
         # Check for Level Complete
         if len(coins) == 0 and initial_coin_count_level > 0:
-            # current_game_state is already module-level global, no 'global' needed here.
             current_game_state = GAME_STATE_LEVEL_COMPLETE
+            save_high_score(score) # Check and save high score on Level Complete
         
         # Draw all sprites
         all_sprites.draw(screen)
@@ -456,6 +499,12 @@ while running:
         title_text = menu_font_large.render("Boot.dev Platformer", True, BLACK)
         title_rect = title_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 200))
         screen.blit(title_text, title_rect)
+
+        # Display High Score on Menu
+        high_score_text = menu_font_medium.render(f"High Score: {high_score}", True, BLACK)
+        high_score_rect = high_score_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 120))
+        screen.blit(high_score_text, high_score_rect)
+
 
         # Display Controls
         controls_title = menu_font_medium.render("Controls:", True, BLACK)
@@ -510,29 +559,35 @@ while running:
     # --- Drawing for Game Over state (moved outside event loop for continuous refresh) ---
     elif current_game_state == GAME_STATE_GAMEOVER:
         game_over_text = game_over_font.render("GAME OVER!", True, RED)
-        final_score_text = menu_font_small.render(f"Final Score: {score}", True, WHITE)
+        final_score_text = menu_font_medium.render(f"Final Score: {score}", True, WHITE)
+        high_score_display_text = menu_font_small.render(f"High Score: {high_score}", True, WHITE)
         restart_text = font.render("Press any key to return to menu", True, WHITE)
 
-        go_rect = game_over_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 80))
-        score_rect = final_score_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 10))
+        go_rect = game_over_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 100))
+        score_rect = final_score_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 30))
+        hs_display_rect = high_score_display_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 20))
         restart_rect = restart_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 100))
 
         screen.blit(game_over_text, go_rect)
         screen.blit(final_score_text, score_rect)
+        screen.blit(high_score_display_text, hs_display_rect)
         screen.blit(restart_text, restart_rect)
 
     # --- Drawing for Level Complete state (moved outside event loop for continuous refresh) ---
     elif current_game_state == GAME_STATE_LEVEL_COMPLETE:
         level_complete_text = game_over_font.render("LEVEL COMPLETE!", True, GREEN)
         current_score_text = menu_font_medium.render(f"Score: {score}", True, WHITE)
+        high_score_display_text = menu_font_small.render(f"High Score: {high_score}", True, WHITE)
         next_level_text = font.render("Press any key for next level", True, WHITE)
 
-        lc_rect = level_complete_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 80))
-        score_rect = current_score_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 10))
+        lc_rect = level_complete_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 100))
+        score_rect = current_score_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 30))
+        hs_display_rect = high_score_display_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 20))
         next_rect = next_level_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 100))
 
         screen.blit(level_complete_text, lc_rect)
         screen.blit(current_score_text, score_rect)
+        screen.blit(high_score_display_text, hs_display_rect)
         screen.blit(next_level_text, next_rect)
 
     pygame.display.flip()
