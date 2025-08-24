@@ -12,6 +12,14 @@ COIN_SIZE = 30
 ENEMY_WIDTH = 40
 ENEMY_HEIGHT = 50
 ENEMY_SPEED = 2
+PROJECTILE_SIZE = 20
+SHIELD_WIDTH = 40
+SHIELD_HEIGHT = 40
+ATTACK_RANGE_SLASH = 40 # Pixels for close-range attack
+ATTACK_RANGE_BLAST = 200 # Pixels for far-range attack
+ATTACK_COOLDOWN = 30 # Frames for cooldown (e.g., 0.5 seconds at 60 FPS)
+SHIELD_DURATION = 60 # Frames for shield duration (e.g., 1 second at 60 FPS)
+BLAST_SPEED = 10
 
 # Colors (RGB tuples)
 WHITE = (255, 255, 255)
@@ -22,6 +30,8 @@ YELLOW = (255, 255, 0)
 RED = (255, 0, 0) # For lives text and Game Over
 GRAY = (150, 150, 150, 100) # For pause overlay (R,G,B, Alpha)
 LIGHT_BLUE = (173, 216, 230) # For testing background visibility if image fails
+PURPLE = (128, 0, 128) # For blast projectile
+LIGHT_GRAY = (200, 200, 200) # For shield visual fallback
 
 # Player physics constants
 GRAVITY = 0.5
@@ -43,6 +53,8 @@ platforms = pygame.sprite.Group()
 moving_platforms = pygame.sprite.Group()
 coins = pygame.sprite.Group()
 enemies = pygame.sprite.Group()
+projectiles = pygame.sprite.Group() # New: for blast attacks
+shields = pygame.sprite.Group()     # New: for player shield
 score = 0
 lives = INITIAL_LIVES
 initial_coin_count_level = 0
@@ -85,6 +97,31 @@ except pygame.error:
     print("Asset Load: ERROR - background_image.png not found. Using default light blue background.")
     pass # No default image, will use screen.fill(LIGHT_BLUE) later
 
+# New Combat Assets
+SLASH_IMAGE = None
+try:
+    SLASH_IMAGE = pygame.image.load('image_628cc4.png').convert_alpha()
+    SLASH_IMAGE = pygame.transform.scale(SLASH_IMAGE, (PLAYER_WIDTH * 2, PLAYER_HEIGHT * 2)) # Larger for effect
+    print("Asset Load: image_628cc4.png (Slash) loaded successfully.")
+except pygame.error:
+    print("Asset Load: ERROR - image_628cc4.png (Slash) not found.")
+
+BLAST_IMAGE = None
+try:
+    BLAST_IMAGE = pygame.image.load('image_629081.png').convert_alpha()
+    BLAST_IMAGE = pygame.transform.scale(BLAST_IMAGE, (PROJECTILE_SIZE * 2, PROJECTILE_SIZE * 2)) # Larger than actual collision size
+    print("Asset Load: image_629081.png (Blast) loaded successfully.")
+except pygame.error:
+    print("Asset Load: ERROR - image_629081.png (Blast) not found.")
+
+SHIELD_IMAGE = None
+try:
+    SHIELD_IMAGE = pygame.image.load('image_62e378.jpg').convert_alpha()
+    SHIELD_IMAGE = pygame.transform.scale(SHIELD_IMAGE, (SHIELD_WIDTH, SHIELD_HEIGHT))
+    print("Asset Load: image_62e378.jpg (Shield) loaded successfully.")
+except pygame.error:
+    print("Asset Load: ERROR - image_62e378.jpg (Shield) not found.")
+
 
 # --- High Score Functions ---
 def load_high_score():
@@ -121,25 +158,83 @@ load_high_score()
 
 # --- Game Classes ---
 
+class Platform(pygame.sprite.Sprite):
+    def __init__(self, x, y, width):
+        super().__init__()
+        self.image = pygame.Surface([width, PLATFORM_HEIGHT])
+        self.image.fill(GREEN)
+        self.rect = self.image.get_rect(topleft=(x, y))
+
+class MovingPlatform(Platform):
+    def __init__(self, x, y, width, start_x, end_x, speed):
+        super().__init__(x, y, width)
+        self.start_x = start_x
+        self.end_x = end_x
+        self.vel_x = speed
+        self.image.fill(BLUE) # Different color for moving platform
+
+    def update(self):
+        self.rect.x += self.vel_x
+        if self.vel_x > 0 and self.rect.right > self.end_x:
+            self.rect.right = self.end_x
+            self.vel_x *= -1
+        elif self.vel_x < 0 and self.rect.left < self.start_x:
+            self.rect.left = self.start_x
+            self.vel_x *= -1
+
+class Coin(pygame.sprite.Sprite):
+    def __init__(self, x, y):
+        super().__init__()
+        try:
+            self.image = pygame.image.load('coin_sprite.png').convert_alpha()
+            self.image = pygame.transform.scale(self.image, (COIN_SIZE, COIN_SIZE))
+        except pygame.error:
+            self.image = pygame.Surface([COIN_SIZE, COIN_SIZE], pygame.SRCALPHA)
+            pygame.draw.circle(self.image, YELLOW, (COIN_SIZE // 2, COIN_SIZE // 2), COIN_SIZE // 2)
+        self.rect = self.image.get_rect(topleft=(x, y))
+
 class Player(pygame.sprite.Sprite):
     def __init__(self, x, y):
         super().__init__()
         try:
-            self.image = pygame.image.load('player_sprite.png').convert_alpha()
-            self.image = pygame.transform.scale(self.image, (PLAYER_WIDTH, PLAYER_HEIGHT))
-            print("Asset Load: player_sprite.png loaded successfully.")
+            self.image_base = pygame.image.load('player_sprite.png').convert_alpha()
+            self.image_base = pygame.transform.scale(self.image_base, (PLAYER_WIDTH, PLAYER_HEIGHT))
         except pygame.error:
-            print("Asset Load: ERROR - player_sprite.png not found. Using a default blue rectangle.")
-            self.image = pygame.Surface([PLAYER_WIDTH, PLAYER_HEIGHT])
-            self.image.fill(BLUE)
+            self.image_base = pygame.Surface([PLAYER_WIDTH, PLAYER_HEIGHT])
+            self.image_base.fill(BLUE)
 
+        self.image = self.image_base # Current image to display
         self.rect = self.image.get_rect(topleft=(x, y))
         self.vel_x = 0
         self.vel_y = 0
         self.on_ground = False
         self.jumps_remaining = MAX_JUMPS
 
+        self.attacking = False # General flag for cooldown
+        self.attack_cooldown_timer = 0
+        self.facing_right = True # For directing attacks
+        self.is_slashing_anim = False # New: for slash visual only
+
+        self.shielding = False
+        self.shield_timer = 0
+        self.is_invincible = False # Player is invincible when shielding
+
     def update(self, platforms, moving_platforms):
+        # Update cooldown timers
+        if self.attack_cooldown_timer > 0:
+            self.attack_cooldown_timer -= 1
+            if self.attack_cooldown_timer == 0:
+                self.attacking = False # Reset general attack state
+                self.is_slashing_anim = False # Reset slash visual
+
+        # Update shield timer
+        if self.shielding:
+            self.shield_timer -= 1
+            if self.shield_timer <= 0:
+                self.shielding = False
+                self.is_invincible = False
+                self.image = self.image_base # Revert to base image
+
         was_on_ground = self.on_ground
         self.vel_y += GRAVITY
         self.rect.y += self.vel_y
@@ -187,6 +282,31 @@ class Player(pygame.sprite.Sprite):
                 self.vel_y = 0
                 self.vel_x = 0
                 self.jumps_remaining = MAX_JUMPS
+                self.is_invincible = False # Ensure invincibility is off after reset
+                self.shielding = False # Ensure shielding is off after reset
+                self.attack_cooldown_timer = 0 # Reset cooldown
+                self.is_slashing_anim = False # Reset slash visual
+                # Remove any active shield sprite
+                for s in shields:
+                    if s.player_ref == self: # Use self instead of player global
+                        s.kill()
+
+
+        # Update player image for facing direction if not currently attacking or shielding
+        if not self.attacking and not self.shielding:
+            if self.vel_x < 0 and self.facing_right:
+                self.image = pygame.transform.flip(self.image_base, True, False)
+                self.facing_right = False
+            elif self.vel_x > 0 and not self.facing_right:
+                self.image = self.image_base
+                self.facing_right = True
+            elif self.vel_x == 0 and not self.facing_right:
+                 # If standing still and facing left, keep flipped image
+                self.image = pygame.transform.flip(self.image_base, True, False)
+            elif self.vel_x == 0 and self.facing_right:
+                # If standing still and facing right, keep original image
+                self.image = self.image_base
+
 
     def jump(self):
         if self.jumps_remaining > 0:
@@ -195,67 +315,124 @@ class Player(pygame.sprite.Sprite):
 
     def move_left(self):
         self.vel_x = -PLAYER_SPEED
+        self.facing_right = False
 
     def move_right(self):
         self.vel_x = PLAYER_SPEED
+        self.facing_right = True
 
     def stop_move(self):
         self.vel_x = 0
 
-class Platform(pygame.sprite.Sprite):
-    def __init__(self, x, y, width):
-        super().__init__()
-        self.image = pygame.Surface([width, PLATFORM_HEIGHT])
-        self.image.fill(GREEN)
-        self.rect = self.image.get_rect(topleft=(x, y))
+    def slash_attack(self):
+        if self.attack_cooldown_timer == 0:
+            self.attacking = True
+            self.is_slashing_anim = True # Activate slash visual
+            self.attack_cooldown_timer = ATTACK_COOLDOWN # Set cooldown
+            # Create a temporary slash hitbox (visual feedback will be in draw)
+            slash_rect = pygame.Rect(self.rect.x, self.rect.y, self.rect.width, self.rect.height)
+            if self.facing_right:
+                slash_rect.left = self.rect.right # Attack to the right
+            else:
+                slash_rect.right = self.rect.left # Attack to the left
+            slash_rect.width = ATTACK_RANGE_SLASH # Extend hitbox for slash
+            return slash_rect
+        return None
 
-class MovingPlatform(Platform):
-    def __init__(self, x, y, width, start_x, end_x, speed):
-        super().__init__(x, y, width)
-        self.start_x = start_x
-        self.end_x = end_x
-        self.vel_x = speed
-        self.original_x = x
+    def blast_attack(self):
+        if self.attack_cooldown_timer == 0:
+            self.attacking = True
+            self.attack_cooldown_timer = ATTACK_COOLDOWN # Set cooldown
+            # Create a projectile
+            if self.facing_right:
+                blast_x = self.rect.right
+                blast_vel_x = BLAST_SPEED
+            else:
+                blast_x = self.rect.left - PROJECTILE_SIZE
+                blast_vel_x = -BLAST_SPEED
+            
+            blast = Projectile(blast_x, self.rect.centery, blast_vel_x)
+            projectiles.add(blast)
+            all_sprites.add(blast)
+        return None
+
+    def activate_shield(self):
+        # Only activate if not already shielding and not currently attacking
+        if not self.shielding and not self.attacking:
+            self.shielding = True
+            self.is_invincible = True
+            self.shield_timer = SHIELD_DURATION # Set shield duration
+            # Create a shield sprite
+            shield_sprite = Shield(self.rect.centerx, self.rect.centery)
+            shields.add(shield_sprite)
+            all_sprites.add(shield_sprite)
+
+
+class Projectile(pygame.sprite.Sprite):
+    def __init__(self, x, y, vel_x):
+        super().__init__()
+        self.image_orig = BLAST_IMAGE if BLAST_IMAGE else pygame.Surface([PROJECTILE_SIZE * 2, PROJECTILE_SIZE * 2], pygame.SRCALPHA)
+        if not BLAST_IMAGE:
+            pygame.draw.circle(self.image_orig, PURPLE, (PROJECTILE_SIZE, PROJECTILE_SIZE), PROJECTILE_SIZE // 2)
+
+        self.image = self.image_orig
+        self.rect = self.image.get_rect(center=(x, y))
+        self.vel_x = vel_x
+        # Projectile disappears after crossing screen width or a set lifetime
+        self.lifetime = SCREEN_WIDTH // abs(BLAST_SPEED) + 10 # Added a small buffer
+        self.creation_time = pygame.time.get_ticks() # Store creation time for debugging/long-range tracking
 
     def update(self):
         self.rect.x += self.vel_x
-        if self.vel_x > 0 and self.rect.right >= self.end_x:
-            self.vel_x *= -1
-        elif self.vel_x < 0 and self.rect.left <= self.start_x:
-            self.vel_x *= -1
+        
+        # Check lifetime based on frames, or position for off-screen
+        self.lifetime -= 1
+        if self.lifetime <= 0 or self.rect.left > SCREEN_WIDTH or self.rect.right < 0:
+            self.kill() # Remove projectile if it goes off screen or lifetime expires
 
-class Coin(pygame.sprite.Sprite):
+class Shield(pygame.sprite.Sprite):
     def __init__(self, x, y):
         super().__init__()
-        try:
-            self.image = pygame.image.load('coin_sprite.png').convert_alpha()
-            self.image = pygame.transform.scale(self.image, (COIN_SIZE, COIN_SIZE))
-            print("Asset Load: coin_sprite.png loaded successfully.")
-        except pygame.error:
-            print("Asset Load: ERROR - coin_sprite.png not found. Using a default yellow circle.")
-            self.image = pygame.Surface([COIN_SIZE, COIN_SIZE], pygame.SRCALPHA)
-            pygame.draw.circle(self.image, YELLOW, (COIN_SIZE // 2, COIN_SIZE // 2), COIN_SIZE // 2 - 2)
-            
+        self.image = SHIELD_IMAGE if SHIELD_IMAGE else pygame.Surface([SHIELD_WIDTH, SHIELD_HEIGHT], pygame.SRCALPHA)
+        if not SHIELD_IMAGE:
+            self.image.fill(LIGHT_GRAY) # Default gray if image not loaded
+            pygame.draw.rect(self.image, BLUE, self.image.get_rect(), 2) # Add a blue border
+
         self.rect = self.image.get_rect(center=(x, y))
+        self.player_ref = player # Reference to the player it's attached to
+
+    def update(self):
+        # Shield should follow the player's position if player is shielding
+        if self.player_ref and self.player_ref.shielding:
+            self.rect.center = self.player_ref.rect.center
+            # Optionally, adjust position slightly based on facing direction
+            # This makes the shield appear slightly in front of the player
+            if self.player_ref.facing_right:
+                self.rect.left = self.player_ref.rect.right - (SHIELD_WIDTH // 4)
+            else:
+                self.rect.right = self.player_ref.rect.left + (SHIELD_WIDTH // 4)
+        else:
+            self.kill() # Remove shield if player is no longer shielding
+
 
 class Enemy(pygame.sprite.Sprite):
     def __init__(self, x, y, patrol_range=100):
         super().__init__()
         try:
-            self.image = pygame.image.load('enemy_sprite.png').convert_alpha()
-            self.image = pygame.transform.scale(self.image, (ENEMY_WIDTH, ENEMY_HEIGHT))
-            print("Asset Load: enemy_sprite.png loaded successfully.")
+            self.image_base = pygame.image.load('enemy_sprite.png').convert_alpha()
+            self.image_base = pygame.transform.scale(self.image_base, (ENEMY_WIDTH, ENEMY_HEIGHT))
         except pygame.error:
-            print("Asset Load: ERROR - enemy_sprite.png not found. Using a default red rectangle.")
-            self.image = pygame.Surface([ENEMY_WIDTH, ENEMY_HEIGHT])
-            self.image.fill(RED)
-
+            self.image_base = pygame.Surface([ENEMY_WIDTH, ENEMY_HEIGHT])
+            self.image_base.fill(RED)
+        
+        self.image = self.image_base # Current image
         self.rect = self.image.get_rect(topleft=(x, y))
         self.vel_x = ENEMY_SPEED
         self.vel_y = 0
         self.start_x = x
         self.patrol_range = patrol_range
         self.on_ground = False
+        self.facing_right = True # For directing enemy visual
 
     def update(self, platforms, moving_platforms):
         all_ground_surfaces = platforms.sprites() + moving_platforms.sprites()
@@ -274,6 +451,15 @@ class Enemy(pygame.sprite.Sprite):
                     self.rect.top = platform.rect.bottom
                     self.vel_y = 0
 
+        # Update facing direction for visual flip
+        if self.vel_x > 0 and not self.facing_right:
+            self.image = self.image_base
+            self.facing_right = True
+        elif self.vel_x < 0 and self.facing_right:
+            self.image = pygame.transform.flip(self.image_base, True, False)
+            self.facing_right = False
+
+
         self.rect.x += self.vel_x
         
         if self.vel_x > 0 and self.rect.right >= self.start_x + self.patrol_range:
@@ -281,24 +467,30 @@ class Enemy(pygame.sprite.Sprite):
         elif self.vel_x < 0 and self.rect.left <= self.start_x - self.patrol_range:
             self.vel_x = ENEMY_SPEED
 
+        # Enemy edge detection (so they don't walk off platforms)
         hit_edge = True
         for platform in all_ground_surfaces:
             if self.vel_x > 0:
-                check_rect = pygame.Rect(self.rect.right, self.rect.bottom, 5, 5)
+                # Check directly in front and slightly below the enemy's bottom-right corner
+                check_point_x = self.rect.right
             else:
-                check_rect = pygame.Rect(self.rect.left - 5, self.rect.bottom, 5, 5)
+                # Check directly in front and slightly below the enemy's bottom-left corner
+                check_point_x = self.rect.left
+
+            # Create a small rect to check for ground beneath
+            check_rect = pygame.Rect(check_point_x, self.rect.bottom + 1, 5, 5) # Check 1 pixel below
 
             if check_rect.colliderect(platform.rect):
                 hit_edge = False
                 break
         
         if hit_edge and self.on_ground:
-            self.vel_x *= -1
+            self.vel_x *= -1 # Turn around if about to walk off an edge
 
 
 # --- Game Setup Function ---
 def setup_game():
-    global player, all_sprites, platforms, moving_platforms, coins, enemies, score, lives, initial_coin_count_level
+    global player, all_sprites, platforms, moving_platforms, coins, enemies, projectiles, shields, score, lives, initial_coin_count_level
 
     # These are assignments to the globally declared variables
     all_sprites = pygame.sprite.Group()
@@ -306,6 +498,8 @@ def setup_game():
     moving_platforms = pygame.sprite.Group()
     coins = pygame.sprite.Group()
     enemies = pygame.sprite.Group()
+    projectiles = pygame.sprite.Group() # Reset projectiles
+    shields = pygame.sprite.Group()     # Reset shields
 
     score = 0
     lives = INITIAL_LIVES
@@ -387,16 +581,25 @@ while running:
                 load_high_score() # Reload high score just in case it was changed elsewhere
         elif current_game_state == GAME_STATE_PLAYING:
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_LEFT:
+                if event.key == pygame.K_LEFT or event.key == pygame.K_a:
                     player.move_left()
-                if event.key == pygame.K_RIGHT:
+                if event.key == pygame.K_RIGHT or event.key == pygame.K_d:
                     player.move_right()
                 if event.key == pygame.K_UP or event.key == pygame.K_w:
                     player.jump()
-                if event.key == pygame.K_a:
-                    player.move_left()
-                if event.key == pygame.K_d:
-                    player.move_right()
+                if event.key == pygame.K_j: # New: Slash attack (close range)
+                    slash_rect = player.slash_attack()
+                    if slash_rect:
+                        # Create a temporary sprite for collision detection with the Rect
+                        temp_slash_sprite = pygame.sprite.Sprite()
+                        temp_slash_sprite.rect = slash_rect
+                        hit_enemies = pygame.sprite.spritecollide(temp_slash_sprite, enemies, True) # True to kill enemy
+                        for enemy in hit_enemies:
+                            score += 10 # More points for defeating enemies
+                if event.key == pygame.K_k: # New: Blast attack (far range)
+                    player.blast_attack()
+                if event.key == pygame.K_l: # New: Shield activation
+                    player.activate_shield()
                 if event.key == pygame.K_ESCAPE: # Press ESC to go back to menu
                     current_game_state = GAME_STATE_MENU
                     setup_game() # Reset level when returning to menu
@@ -405,13 +608,9 @@ while running:
                 if event.key == pygame.K_p: # New: Press 'P' to pause
                     current_game_state = GAME_STATE_PAUSED
             if event.type == pygame.KEYUP:
-                if event.key == pygame.K_LEFT and player.vel_x < 0:
+                if (event.key == pygame.K_LEFT or event.key == pygame.K_a) and player.vel_x < 0:
                     player.stop_move()
-                if event.key == pygame.K_RIGHT and player.vel_x > 0:
-                    player.stop_move()
-                if event.key == pygame.K_a and player.vel_x < 0:
-                    player.stop_move()
-                if event.key == pygame.K_d and player.vel_x > 0:
+                if (event.key == pygame.K_RIGHT or event.key == pygame.K_d) and player.vel_x > 0:
                     player.stop_move()
         elif current_game_state == GAME_STATE_PAUSED:
             if event.type == pygame.KEYDOWN:
@@ -446,22 +645,13 @@ while running:
         player.update(platforms, moving_platforms)
         enemies.update(platforms, moving_platforms)
         moving_platforms.update()
+        projectiles.update() # Update projectiles
+        shields.update()     # Update shields
 
-        # Player-Enemy Collision (Player jumps on enemy)
+        # Player-Enemy Collision (Player takes damage unless shielding)
         colliding_enemies = pygame.sprite.spritecollide(player, enemies, False)
         for enemy in colliding_enemies:
-            # Check if player is falling on top of the enemy
-            if player.vel_y > 0 and player.rect.bottom >= enemy.rect.top and player.rect.bottom < enemy.rect.top + player.vel_y + 5: # Added a small buffer
-                player.vel_y = JUMP_STRENGTH * 0.7  # Bounce player up
-                enemy.kill() # Defeat enemy
-                num_dropped_coins = random.randint(1, 3) # Drop coins from defeated enemy
-                for _ in range(num_dropped_coins):
-                    coin_x = enemy.rect.centerx + random.randint(-5, 5)
-                    coin_y = enemy.rect.centery + random.randint(-5, 5)
-                    new_coin = Coin(coin_x, coin_y)
-                    coins.add(new_coin)
-                    all_sprites.add(new_coin)
-            else: # Enemy collides with player from side or bottom, player takes damage
+            if not player.is_invincible: # Player only takes damage if not shielding
                 lives -= 1
                 # Reset player position
                 player.rect.x = 100
@@ -469,16 +659,38 @@ while running:
                 player.vel_y = 0
                 player.vel_x = 0
                 player.jumps_remaining = MAX_JUMPS
+                player.is_invincible = False # Ensure invincibility is off after reset
+                player.shielding = False # Ensure shielding is off after reset
+                player.attack_cooldown_timer = 0 # Reset cooldown
+                player.is_slashing_anim = False # Reset slash visual
+                # Remove any active shield sprite
+                for s in shields:
+                    if s.player_ref == player:
+                        s.kill()
 
                 if lives <= 0:
                     current_game_state = GAME_STATE_GAMEOVER
                     save_high_score(score) # Check and save high score on Game Over
+            else:
+                # If player is invincible (shielding), enemies are temporarily pushed back or ignore collision
+                # For now, let's just make the enemy turn around
+                enemy.vel_x *= -1
+
+
+        # Projectile-Enemy Collision
+        for projectile in projectiles:
+            hit_enemies = pygame.sprite.spritecollide(projectile, enemies, True) # True to kill enemy
+            for enemy in hit_enemies:
+                projectile.kill() # Destroy projectile on hit
+                score += 10 # More points for defeating enemies
+
 
         # Player-Coin Collision
         collected_coins = pygame.sprite.spritecollide(player, coins, True) # True means remove coin on collision
         for coin in collected_coins:
             score += 1
-        
+
+
         # Check for Level Complete
         if len(coins) == 0 and initial_coin_count_level > 0:
             current_game_state = GAME_STATE_LEVEL_COMPLETE
@@ -486,6 +698,14 @@ while running:
         
         # Draw all sprites
         all_sprites.draw(screen)
+
+        # Draw slash attack visual ONLY if is_slashing_anim is true
+        if player.is_slashing_anim and SLASH_IMAGE:
+            if player.facing_right:
+                slash_draw_x = player.rect.right - (PLAYER_WIDTH // 2)
+            else:
+                slash_draw_x = player.rect.left - SLASH_IMAGE.get_width() + (PLAYER_WIDTH // 2)
+            screen.blit(SLASH_IMAGE, (slash_draw_x, player.rect.centery - SLASH_IMAGE.get_height() // 2))
 
         # Draw score and lives in PLAYING state
         score_text = font.render(f"Score: {score}", True, WHITE)
@@ -513,9 +733,11 @@ while running:
 
         control_lines = [
             "Arrow Keys / WASD: Move Left/Right & Jump",
+            "J: Slash Attack (close range)", # New control
+            "K: Blast Attack (far range)",   # New control
+            "L: Activate Shield",            # New control
             "P: Pause / Resume Game",
             "ESC: Return to Menu (from Game or Pause)",
-            "Jump on top of Enemies to defeat them!",
             "Collect all Coins to complete the level!"
         ]
         
