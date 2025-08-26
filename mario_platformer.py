@@ -18,6 +18,7 @@ PROJECTILE_SIZE = 20
 SHIELD_WIDTH = 40
 SHIELD_HEIGHT = 40
 ATTACK_COOLDOWN = 30 # Frames for cooldown (e.g., 0.5 seconds at 60 FPS)
+ATTACK_COOLDOWN_CLUB = 15 # Faster attack for the Club
 SHIELD_DURATION = 60 # Frames for shield duration (e.g., 1 second at 60 FPS)
 BLAST_SPEED = 10
 ROLL_DURATION = 15 # Frames for roll (e.g., 0.25 seconds)
@@ -707,25 +708,43 @@ class Player(pygame.sprite.Sprite):
 
 
     def slash_attack(self):
-        if self.attack_cooldown_timer == 0:
-            self.attacking = True
-            self.is_slashing_anim = True # Activate slash visual
-            self.attack_cooldown_timer = ATTACK_COOLDOWN # Set cooldown
+        if (self.current_weapon == "club" and self.attack_cooldown_timer > 0 and self.attack_cooldown_timer > (ATTACK_COOLDOWN_CLUB / 2)) or \
+           (self.current_weapon != "club" and self.attack_cooldown_timer > 0):
+            return None # Prevent attacking if cooldown is active (and handle club faster cooldown)
 
-            # Create a temporary slash hitbox based on current weapon's range
-            current_attack_range = self.attack_range_current
-            
-            slash_rect = pygame.Rect(self.rect.x, self.rect.y, self.rect.width, self.rect.height)
-            if self.facing_right:
-                slash_rect.left = self.rect.right # Attack to the right
-            else:
-                slash_rect.right = self.rect.left # Attack to the left
-            slash_rect.width = current_attack_range # Extend hitbox for slash
-            return slash_rect
-        return None
+        self.attacking = True
+        self.is_slashing_anim = True # Activate slash visual
+        
+        # Set cooldown based on weapon
+        if self.current_weapon == "club":
+            self.attack_cooldown_timer = ATTACK_COOLDOWN_CLUB
+        else:
+            self.attack_cooldown_timer = ATTACK_COOLDOWN
+
+        # Create a temporary slash hitbox based on current weapon's range
+        current_attack_range = self.attack_range_current
+        
+        slash_rect = pygame.Rect(self.rect.x, self.rect.y, self.rect.width, self.rect.height)
+        if self.facing_right:
+            slash_rect.left = self.rect.right # Attack to the right
+            if self.current_weapon == "big_sword": # Make Big Sword attack around player
+                slash_rect.left = self.rect.left
+                slash_rect.width = self.rect.width + current_attack_range
+        else:
+            slash_rect.right = self.rect.left # Attack to the left
+            if self.current_weapon == "big_sword": # Make Big Sword attack around player
+                slash_rect.right = self.rect.right
+                slash_rect.width = self.rect.width + current_attack_range
+        
+        # Adjust vertical position for big sword to cover more area
+        if self.current_weapon == "big_sword":
+            slash_rect.y -= (self.rect.height // 2)
+            slash_rect.height += self.rect.height
+
+        return slash_rect
 
     def blast_attack(self):
-        if not self.has_blast: # Player cannot use blast attack if not unlocked
+        if not self.has_blast or self.current_weapon == "big_sword": # Cannot use blast if not unlocked or using big sword
             return None
         # Cannot blast if currently fire dashing (combo ability)
         if self.is_fire_dashing:
@@ -858,23 +877,30 @@ class Player(pygame.sprite.Sprite):
         self.current_weapon = weapon_type
         if weapon_type == "big_sword":
             self.attack_range_current = ATTACK_RANGE_BIG_SWORD
-            self.attack_damage_multiplier = 1
+            self.attack_damage_multiplier = 2 # Big Sword deals 2x damage
             self.attack_knockback = 0
-            print(f"Weapon selected: Big Sword (Range: {self.attack_range_current})")
+            self.has_blast = False # Disable blast if Big Sword is chosen
+            print(f"Weapon selected: Big Sword (Range: {self.attack_range_current}, Damage: {self.attack_damage_multiplier}x, Blast Disabled)")
         elif weapon_type == "dagger":
             self.attack_range_current = ATTACK_RANGE_SLASH # Same range as slash
-            self.attack_damage_multiplier = 1 # Damage multiplier applies only from behind
+            self.attack_damage_multiplier = 1 # Base damage, 3x from behind handled in collision
             self.attack_knockback = 0
-            print(f"Weapon selected: Dagger (3x damage from behind)")
+            # Re-enable blast if switching from Big Sword, assuming player unlocked it
+            self.has_blast = (current_level >= BLAST_ATTACK_UNLOCK_LEVEL)
+            print(f"Weapon selected: Dagger (3x damage from behind, 0x front)")
         elif weapon_type == "club":
             self.attack_range_current = ATTACK_RANGE_SLASH # Same range as slash
-            self.attack_damage_multiplier = 1
-            self.attack_knockback = KNOCKBACK_STRENGTH
-            print(f"Weapon selected: Club (Knockback: {self.attack_knockback})")
+            self.attack_damage_multiplier = 1 # Club deals 1x damage
+            self.attack_knockback = KNOCKBACK_STRENGTH # Club has knockback
+            # Re-enable blast if switching from Big Sword, assuming player unlocked it
+            self.has_blast = (current_level >= BLAST_ATTACK_UNLOCK_LEVEL)
+            print(f"Weapon selected: Club (Knockback: {self.attack_knockback}, Faster Attack)")
         else: # default_slash
             self.attack_range_current = ATTACK_RANGE_SLASH
             self.attack_damage_multiplier = 1
             self.attack_knockback = 0
+            # Re-enable blast if switching from Big Sword, assuming player unlocked it
+            self.has_blast = (current_level >= BLAST_ATTACK_UNLOCK_LEVEL)
             print(f"Weapon selected: Default Slash (Range: {self.attack_range_current})")
 
 
@@ -1122,7 +1148,7 @@ class Boss(pygame.sprite.Sprite):
         self.on_ground = False
         self.facing_right = True
         self.health = BOSS_HEALTH_MAX
-        self.attack_cooldown_timer = BOSS_BLAST_COOLDown # Initial cooldown for blast
+        self.attack_cooldown_timer = BOSS_BLAST_COOLDOWN # Initial cooldown for blast
 
     def update(self, platforms, moving_platforms, player_rect):
         all_ground_surfaces = platforms.sprites() + moving_platforms.sprites()
@@ -1307,6 +1333,51 @@ class OrbitingLight(pygame.sprite.Sprite):
         self.rect.centery = player_center_y + ORBIT_SHIELD_RADIUS * math.sin(self.current_angle + angle_modifier)
 
 
+# --- Global Helper Functions for Damage Application ---
+def apply_player_damage_to_enemy(target_enemy, player_ref, score_increment=10):
+    global score # Refer to global score
+    damage_dealt = player_ref.attack_damage_multiplier
+
+    if player_ref.current_weapon == "dagger":
+        # Check if player is behind the enemy
+        is_behind = (player_ref.facing_right and target_enemy.rect.left > player_ref.rect.right) or \
+                    (not player_ref.facing_right and target_enemy.rect.right < player_ref.rect.left)
+        
+        if is_behind:
+            damage_dealt *= 3 # 3x damage from behind
+        else:
+            damage_dealt = 0 # 0 damage from front
+
+    target_enemy.take_damage(damage_dealt)
+    if not target_enemy.alive():
+        score += score_increment # Points for defeating enemies
+    
+    # Club specific knockback
+    if player_ref.current_weapon == "club" and player_ref.attack_knockback > 0:
+        knockback_direction = 1 if player_ref.facing_right else -1
+        target_enemy.rect.x += player_ref.attack_knockback * knockback_direction
+        # Clamp enemy position within screen bounds after knockback
+        target_enemy.rect.left = max(0, target_enemy.rect.left)
+        target_enemy.rect.right = min(SCREEN_WIDTH, target_enemy.rect.right)
+
+def apply_player_damage_to_boss(boss_sprite_ref, player_ref, base_damage, score_increment=5):
+    global score # Refer to global score
+    damage_dealt = base_damage * player_ref.attack_damage_multiplier
+    
+    # Bosses are generally not affected by dagger's 'from behind' bonus for balance
+    # Bosses are generally not affected by club's faster attack either, but knockback still applies
+    
+    boss_sprite_ref.take_damage(damage_dealt)
+    score += score_increment # Small score for hitting boss
+    
+    # Apply knockback to boss if club is used (less effective on boss)
+    if player_ref.current_weapon == "club" and player_ref.attack_knockback > 0:
+        knockback_direction = 1 if player_ref.facing_right else -1
+        boss_sprite_ref.rect.x += (player_ref.attack_knockback / 2) * knockback_direction # Half knockback for boss
+        boss_sprite_ref.rect.left = max(0, boss_sprite_ref.rect.left)
+        boss_sprite_ref.rect.right = min(SCREEN_WIDTH, boss_sprite_ref.rect.right)
+
+
 # --- Game Setup Function ---
 def setup_game():
     global player, all_sprites, platforms, moving_platforms, coins, enemies, projectiles, shields
@@ -1342,7 +1413,11 @@ def setup_game():
     player.reset_position_and_state(keep_powerups=True) 
     
     # Set initial player power-up states based on level (for blast unlock)
-    player.has_blast = (current_level >= BLAST_ATTACK_UNLOCK_LEVEL)
+    # Ensure has_blast is consistent with big_sword choice
+    if player.current_weapon == "big_sword":
+        player.has_blast = False
+    else:
+        player.has_blast = (current_level >= BLAST_ATTACK_UNLOCK_LEVEL)
     
     # Do not generate level immediately if in MENU, PLAYER_SELECT, CREATE_PLAYER, or WEAPON_SELECT state
     if current_game_state == GAME_STATE_MENU or \
@@ -1773,55 +1848,24 @@ while running:
                         temp_slash_sprite = pygame.sprite.Sprite()
                         temp_slash_sprite.rect = slash_rect
                         
-                        # Apply damage to enemies based on weapon
-                        # Define a function to handle damage application to various enemy types
-                        def apply_player_damage(target_enemy, player_ref, score_increment=10):
-                            global score # Refer to global score
-                            damage_dealt = player_ref.attack_damage_multiplier
-                            # Dagger specific damage from behind
-                            if player_ref.current_weapon == "dagger":
-                                # Check if player is behind the enemy
-                                if (player_ref.facing_right and target_enemy.rect.left > player_ref.rect.right) or \
-                                   (not player_ref.facing_right and target_enemy.rect.right < player_ref.rect.left):
-                                    damage_dealt *= 3 # 3x damage from behind
-                            
-                            target_enemy.take_damage(damage_dealt)
-                            if not target_enemy.alive():
-                                score += score_increment # Points for defeating enemies
-                            
-                            # Club specific knockback
-                            if player_ref.current_weapon == "club" and player_ref.attack_knockback > 0:
-                                knockback_direction = 1 if player_ref.facing_right else -1
-                                target_enemy.rect.x += player_ref.attack_knockback * knockback_direction
-                                # Clamp enemy position within screen bounds after knockback
-                                target_enemy.rect.left = max(0, target_enemy.rect.left)
-                                target_enemy.rect.right = min(SCREEN_WIDTH, target_enemy.rect.right)
-
                         # Check for regular/guard enemy collisions
                         hit_enemies = pygame.sprite.spritecollide(temp_slash_sprite, enemies, False)
                         for enemy in hit_enemies:
-                            apply_player_damage(enemy, player, 10) # 10 points for regular/guard
+                            apply_player_damage_to_enemy(enemy, player, 10) # 10 points for regular/guard
 
                         # Check for shooter enemy collisions
                         hit_shooter_enemies = pygame.sprite.spritecollide(temp_slash_sprite, shooter_enemies, False)
                         for enemy in hit_shooter_enemies:
-                            apply_player_damage(enemy, player, 10) # 10 points for shooter
+                            apply_player_damage_to_enemy(enemy, player, 10) # 10 points for shooter
 
                         # Check for flyer enemy collisions
                         hit_flyer_enemies = pygame.sprite.spritecollide(temp_slash_sprite, flyer_enemies, False)
                         for enemy in hit_flyer_enemies:
-                            apply_player_damage(enemy, player, 10) # 10 points for flyer
+                            apply_player_damage_to_enemy(enemy, player, 10) # 10 points for flyer
 
                         # Check for boss collision with the slash hitbox
                         if boss_active and boss_sprite and pygame.sprite.collide_rect(temp_slash_sprite, boss_sprite):
-                            boss_sprite.take_damage(10 * player.attack_damage_multiplier) # Slash does 10 damage to boss
-                            score += 5 # Small score for hitting boss
-                            # Apply knockback to boss if club is used (less effective on boss)
-                            if player.current_weapon == "club" and player.attack_knockback > 0:
-                                knockback_direction = 1 if player.facing_right else -1
-                                boss_sprite.rect.x += (player.attack_knockback / 2) * knockback_direction # Half knockback for boss
-                                boss_sprite.rect.left = max(0, boss_sprite.rect.left)
-                                boss_sprite.rect.right = min(SCREEN_WIDTH, boss_sprite.rect.right)
+                            apply_player_damage_to_boss(boss_sprite, player, 10, 5) # Base 10 damage to boss
 
 
                 if event.key == pygame.K_k and not (key_lshift_pressed or key_rshift_pressed): # Only blast if SHIFT is NOT pressed
@@ -1925,14 +1969,12 @@ while running:
                                 pygame.sprite.spritecollide(player, flyer_enemies, False)
             
             for enemy_target in fire_dash_enemies:
-                damage_dealt = FIRE_DASH_DAMAGE_MULTIPLIER * player.attack_damage_multiplier
-                enemy_target.take_damage(damage_dealt)
-                if not enemy_target.alive():
-                    score += 10 # Points for defeating enemies with fire dash
+                # Fire dash damage to regular enemies
+                apply_player_damage_to_enemy(enemy_target, player, 10 * FIRE_DASH_DAMAGE_MULTIPLIER)
 
             if boss_active and boss_sprite and pygame.sprite.collide_rect(player, boss_sprite):
-                boss_sprite.take_damage(FIRE_DASH_DAMAGE_MULTIPLIER * player.attack_damage_multiplier * 5) # Fire dash stronger on boss
-                score += 25 # More score for fire dashing boss
+                # Fire dash damage to boss
+                apply_player_damage_to_boss(boss_sprite, player, 20 * FIRE_DASH_DAMAGE_MULTIPLIER, 25) # Base 20 damage * 5x multiplier, 25 score
 
 
         # Regular and Guard enemies
@@ -1966,32 +2008,26 @@ while running:
             hit_enemies_general = pygame.sprite.spritecollide(projectile, enemies, False) # Check for regular/guard
             for enemy in hit_enemies_general:
                 projectile.kill()
-                enemy.take_damage(1 * player.attack_damage_multiplier) # Player blast damage
-                if not enemy.alive():
-                    score += 10
+                apply_player_damage_to_enemy(enemy, player, 10) # Player blast damage
             
             hit_shooter_enemies = pygame.sprite.spritecollide(projectile, shooter_enemies, False) # Check for shooter
             for enemy in hit_shooter_enemies:
                 projectile.kill()
-                enemy.take_damage(1 * player.attack_damage_multiplier) # Player blast damage
-                if not enemy.alive():
-                    score += 10
+                apply_player_damage_to_enemy(enemy, player, 10) # Player blast damage
             
             hit_flyer_enemies = pygame.sprite.spritecollide(projectile, flyer_enemies, False) # Check for flyer
             for enemy in hit_flyer_enemies:
                 projectile.kill()
-                enemy.take_damage(1 * player.attack_damage_multiplier) # Player blast damage
-                if not enemy.alive():
-                    score += 10
+                apply_player_damage_to_enemy(enemy, player, 10) # Player blast damage
 
 
         # Projectile-Boss Collision (Player's blast hits boss)
         if boss_active and boss_sprite:
             for projectile in projectiles:
                 if pygame.sprite.collide_rect(projectile, boss_sprite):
-                    boss_sprite.take_damage(20 * player.attack_damage_multiplier) # Blast does 20 damage to boss
                     projectile.kill() # Destroy projectile on hit
-                    score += 5 # Small score for hitting boss
+                    apply_player_damage_to_boss(boss_sprite, player, 20, 5) # Blast does 20 damage to boss
+
 
         # Boss Projectile-Player/Orbiting Light Collision
         if boss_active and boss_sprite and player:
@@ -2060,7 +2096,7 @@ while running:
         orbiting_lights_group.draw(screen) # Use global group for drawing
 
         # Draw slash attack visual ONLY if is_slashing_anim is true and player exists
-        if player and player.is_slashing_anim and SLASH_IMAGE:
+        if player and player.is_slashing_anim:
             # Determine which weapon image to draw for slash animation
             weapon_draw_image = None
             if player.current_weapon == "big_sword" and BIG_SWORD_IMAGE:
@@ -2069,18 +2105,37 @@ while running:
                 weapon_draw_image = DAGGER_IMAGE
             elif player.current_weapon == "club" and CLUB_IMAGE:
                 weapon_draw_image = CLUB_IMAGE
-            else: # Default slash image if no specific weapon or image missing
+            elif SLASH_IMAGE: # Fallback for default slash if no specific weapon or image missing
                 weapon_draw_image = SLASH_IMAGE
 
             if weapon_draw_image:
                 # Adjust position to be near the player and facing correct direction
-                if player.facing_right:
-                    slash_draw_x = player.rect.right - (PLAYER_WIDTH // 4) # Slightly overlap player
-                    draw_image = weapon_draw_image
-                else:
-                    slash_draw_x = player.rect.left - weapon_draw_image.get_width() + (PLAYER_WIDTH // 4) # Slightly overlap
-                    draw_image = pygame.transform.flip(weapon_draw_image, True, False) # Flip for left
-                screen.blit(draw_image, (slash_draw_x, player.rect.centery - draw_image.get_height() // 2))
+                # For big sword, the image should be centered on the expanded slash_rect
+                if player.current_weapon == "big_sword":
+                    # The image needs to cover the extended width of the big sword attack
+                    # Calculate new size to cover player.rect.width + ATTACK_RANGE_BIG_SWORD
+                    # This is a bit of a manual adjustment for visual, actual collision is slash_rect
+                    display_width = player.rect.width + ATTACK_RANGE_BIG_SWORD
+                    display_height = player.rect.height * 2 # Cover more vertical space
+                    display_image = pygame.transform.scale(BIG_SWORD_IMAGE, (display_width, display_height))
+
+                    if player.facing_right:
+                        draw_x = player.rect.x
+                    else:
+                        draw_x = player.rect.x - (display_width - player.rect.width) # Start drawing further left
+                    draw_y = player.rect.centery - (display_height // 2)
+
+                    screen.blit(display_image, (draw_x, draw_y))
+
+
+                else: # For default slash, dagger, club (standard slash visual)
+                    if player.facing_right:
+                        slash_draw_x = player.rect.right - (PLAYER_WIDTH // 4) # Slightly overlap player
+                        draw_image = weapon_draw_image
+                    else:
+                        slash_draw_x = player.rect.left - weapon_draw_image.get_width() + (PLAYER_WIDTH // 4) # Slightly overlap
+                        draw_image = pygame.transform.flip(weapon_draw_image, True, False) # Flip for left
+                    screen.blit(draw_image, (slash_draw_x, player.rect.centery - draw_image.get_height() // 2))
 
 
         # Draw Boss Health Bar
@@ -2220,9 +2275,9 @@ while running:
         screen.blit(weapon_title, weapon_title_rect)
 
         weapons_options = [
-            ("Big Sword", BIG_SWORD_IMAGE, "Longer range, standard damage."),
-            ("Dagger", DAGGER_IMAGE, "3x damage when attacking from behind."),
-            ("Club", CLUB_IMAGE, "Knocks enemies away on hit.")
+            ("Big Sword", BIG_SWORD_IMAGE, "Wide arc attack, 2x damage, cannot use blast."),
+            ("Dagger", DAGGER_IMAGE, "3x damage from behind, 0x from front."),
+            ("Club", CLUB_IMAGE, "Knocks enemies away, faster attack speed.")
         ]
         
         y_offset = SCREEN_HEIGHT // 2 - 50
